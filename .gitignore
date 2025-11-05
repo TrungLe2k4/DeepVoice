@@ -1,0 +1,36 @@
+# === Python ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+venv/
+.env
+*.env
+
+# === Audio & Large files ===
+1_data/raw/
+1_data/cleaned/
+1_data/augment/
+*.wav
+*.mp3
+*.flac
+
+# === Model / Checkpoints ===
+*.h5
+*.pkl
+*.onnx
+*.pt
+*.pth
+*.joblib
+
+# === Node/Extension ===
+node_modules/
+*.zip
+*.crx
+
+# === IDE/OS ===
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
