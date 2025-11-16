@@ -5,8 +5,9 @@ __pycache__/
 *.pyd
 *.log
 venv/
-.env
-*.env
+.venv/
+backend_flask/venv/
+backend_flask/.venv/
 
 # === Audio & Large files ===
 1_data/raw/

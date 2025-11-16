@@ -1,0 +1,34 @@
+# === Core Python Utilities ===
+numpy>=1.26.0
+pandas>=2.1.0
+tqdm>=4.66.0
+joblib>=1.3.0
+
+# === Audio Processing (DSP) ===
+librosa>=0.10.1
+soundfile>=0.12.1
+pydub>=0.25.1
+scipy>=1.11.3
+
+# === Machine Learning ===
+scikit-learn>=1.3.2
+xgboost>=2.0.3
+
+# === Deep Learning (optional, for CNN/wav2vec2) ===
+torch>=2.1.0
+torchaudio>=2.1.0
+torchvision>=0.16.0
+
+# === Flask Backend ===
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# === Visualization & Reporting (optional) ===
+matplotlib>=3.8.0
+seaborn>=0.13.0
+
+# === Utility for audio augmentation (optional) ===
+audiomentations>=0.34.0
+
+# === Chrome Extension testing & Local API ===
+requests>=2.31.0

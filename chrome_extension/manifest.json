@@ -1,24 +1,57 @@
 {
   "manifest_version": 3,
   "name": "DeepVoice Attack Guard",
-  "description": "Phát hiện dấu hiệu deepfake (giọng nói tổng hợp) trong Google Meet và cảnh báo theo thời gian thực.",
   "version": "0.1.0",
-  "action": { "default_title": "DeepVoice Guard" },
+  "description": "Phát hiện dấu hiệu deepfake giọng nói trong Google Meet.",
+  
+  "action": {
+    "default_title": "DeepVoice Guard"
+  },
 
-  "host_permissions": ["https://meet.google.com/*"],
-  "permissions": ["scripting", "activeTab", "storage"],
+  "host_permissions": [
+    "https://meet.google.com/*",
+    "http://127.0.0.1:5000/*"
+  ],
 
-  "background": { "service_worker": "background.js", "type": "module" },
+  "permissions": [
+    "tabs",
+    "scripting",
+    "activeTab",
+    "storage"
+  ],
 
-  "content_scripts": [{
-    "matches": ["https://meet.google.com/*"],
-    "js": ["content.js"],
-    "css": ["overlay.css"],
-    "run_at": "document_idle"
-  }],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
 
-  "web_accessible_resources": [{
-    "resources": ["worklet-processor.js", "model.js"],
-    "matches": ["https://meet.google.com/*"]
-  }]
+  "content_scripts": [
+    {
+      "matches": [
+        "https://meet.google.com/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "overlay.css"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true,
+      "type": "module"
+    }
+  ],
+
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "worklet-processor.js",
+        "utils_dsp.js",
+        "model.js"
+      ],
+      "matches": [
+        "https://meet.google.com/*"
+      ]
+    }
+  ]
 }
