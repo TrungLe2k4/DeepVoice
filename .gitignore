@@ -1,36 +1,65 @@
-# === Python ===
+# =========================
+# === Python / Virtualenv
+# =========================
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.log
+
 venv/
 .venv/
-backend_flask/venv/
-backend_flask/.venv/
+*/venv/
+*/.venv/
 
-# === Audio & Large files ===
-1_data/raw/
-1_data/cleaned/
-1_data/augment/
+# =========================
+# === Datasets (Audio)
+# =========================
+# Thư mục data gốc của đồ án
+Data/
+data/
+*/Data/
+*/data/
+
+# File audio (tránh đẩy dataset lên GitHub)
 *.wav
 *.mp3
 *.flac
 
-# === Model / Checkpoints ===
+# =========================
+# === Models / Checkpoints
+# =========================
+# Model & feature data
+backend_flask/Models/
 *.h5
 *.pkl
 *.onnx
 *.pt
 *.pth
 *.joblib
+*.npz
+*.npy
+*.jsonl
 
-# === Node/Extension ===
+# =========================
+# === Logs / Output
+# =========================
+Logs/
+*/Logs/
+*.log
+
+# =========================
+# === Node / Extension build
+# =========================
 node_modules/
+dist/
+build/
 *.zip
 *.crx
 
-# === IDE/OS ===
+# =========================
+# === IDE / OS
+# =========================
 .vscode/
 .idea/
 .DS_Store
