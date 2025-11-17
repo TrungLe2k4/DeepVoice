@@ -318,7 +318,7 @@ class DVAnalyzer extends AudioWorkletProcessor {
     const optSr = options?.processorOptions?.sampleRate;
     this.sr = optSr || (typeof sampleRate !== "undefined" ? sampleRate : 48000);
 
-    this.hopSec = 0.5;                 // gửi mỗi 0.5s
+    this.hopSec = 0.5;                 // phân tích khung 0.5s
     this.bufTarget = Math.floor(this.sr * this.hopSec);
     this.frame = new Float32Array(0);
 
@@ -351,6 +351,15 @@ class DVAnalyzer extends AudioWorkletProcessor {
     // 🟢 VAD thresholds – CHỈ GỬI KHI CÓ TIẾNG NÓI
     this.vadRmsThresh = 0.005;   // nhỏ hơn coi như im lặng
     this.vadSnrThresh = 3;       // SNR < 3 dB coi như noise nền
+
+    // ⏱ Throttle theo thời gian: chỉ postMessage mỗi X giây
+    // Ví dụ: 1.0 = mỗi 1 giây một lần; 2.0 = 2 giây một lần
+    this.postIntervalSec = 1.0;
+    this.postIntervalFrames = Math.max(
+      1,
+      Math.round(this.postIntervalSec / this.hopSec)
+    ); // với hopSec=0.5, 1.0s -> 2 khung
+    this._frameIndex = 0;
   }
 
   _magFromTime(frame) {
@@ -465,6 +474,14 @@ class DVAnalyzer extends AudioWorkletProcessor {
 
       if (isSilentLike) {
         // Không gửi gì cho content.js → backend không bị spam khi không ai nói
+        continue;
+      }
+
+      // ⏱ Throttle theo thời gian ở cấp worklet:
+      // _frameIndex tăng mỗi 0.5s; chỉ gửi khi đủ số khung theo postIntervalFrames
+      this._frameIndex++;
+      if (this._frameIndex % this.postIntervalFrames !== 0) {
+        // Ví dụ: hop=0.5s, postIntervalSec=1.0s => gửi mỗi 2 khung
         continue;
       }
 

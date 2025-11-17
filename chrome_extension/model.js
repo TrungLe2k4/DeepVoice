@@ -38,35 +38,50 @@ export async function setApiBase(url) {
 })();
 
 // === Throttle để không spam server ===
-// (đã có VAD ở worklet, cái này chỉ là tầng bảo vệ thêm)
+// (đã có VAD ở worklet + throttle ở content.js, cái này chỉ là tầng bảo vệ thêm)
 let lastServerCall = 0;
+// Có thể chỉnh nếu muốn: 800 = 0.8s, 2000 = 2s,...
 const MIN_SERVER_INTERVAL_MS = 800; // không gọi /analyze quá ~1 lần/giây
 
 // === Gọi API /analyze ===
-export async function sendFeatures(features) {
+export async function sendFeatures(features = {}) {
   const now = Date.now();
 
   // 🔍 Tính xác suất heuristic trước để quyết định có cần gọi Flask không
   const heur = heuristicProb(features);
-  const metaIn = features.meta || {};
+  const metaIn = (features && features.meta) || {};
   const snrIn = typeof metaIn.snr === "number" ? metaIn.snr : 0;
 
   // 🟢 GATE: nếu SNR rất thấp (gần im lặng) hoặc heuristic cực thấp
   // => chỉ dùng heuristic, KHÔNG gọi API /analyze
   if (snrIn < 3 || heur < 0.1) {
     return {
+      prob_fast: heur,
+      prob_deep: heur,
+      prob_embed: heur,
       prob_fused: heur,
+      prob_heur: heur,
       reason: ["local-vad-gate"],
+      level: "",
       snr: snrIn,
+      flags: {},
+      version: "dv-local",
     };
   }
 
   // 🕒 Throttle server: khi có tiếng nói nhưng không muốn spam backend
   if (now - lastServerCall < MIN_SERVER_INTERVAL_MS) {
     return {
+      prob_fast: heur,
+      prob_deep: heur,
+      prob_embed: heur,
       prob_fused: heur,
+      prob_heur: heur,
       reason: ["server-throttle"],
+      level: "",
       snr: snrIn,
+      flags: {},
+      version: "dv-local",
     };
   }
   lastServerCall = now;
@@ -83,28 +98,42 @@ export async function sendFeatures(features) {
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const out = await res.json();
 
+    const prob_fused = out.prob_fused ?? heur;
+
     // normalize output tối thiểu cần cho UI
     return {
-      prob_fast: out.prob_fast ?? 0,
-      prob_deep: out.prob_deep ?? 0,
-      prob_embed: out.prob_embed ?? 0,
-      prob_fused: out.prob_fused ?? heur, // fallback về heur nếu thiếu
+      prob_fast: out.prob_fast ?? prob_fused,
+      prob_deep: out.prob_deep ?? prob_fused,
+      prob_embed: out.prob_embed ?? prob_fused,
+      prob_fused,
+      prob_heur: heur,
       reason: Array.isArray(out.reason) ? out.reason : [],
       level: out.level || "",
-      snr: out.snr ?? snrIn,
+      snr: typeof out.snr === "number" ? out.snr : snrIn,
       flags: out.flags || {},
       version: out.version || "dv-unknown",
     };
   } catch (e) {
     // fallback khi API lỗi/offline
     console.warn("[DV] API /analyze error:", e);
-    return { prob_fused: heur, reason: ["api-fallback"], snr: snrIn };
+    return {
+      prob_fast: heur,
+      prob_deep: heur,
+      prob_embed: heur,
+      prob_fused: heur,
+      prob_heur: heur,
+      reason: ["api-fallback"],
+      level: "",
+      snr: snrIn,
+      flags: {},
+      version: "dv-offline",
+    };
   }
 }
 
 // === API chính được content.js gọi ===
 // content.js hiện đang làm: const prob = await DVModel.predictProb(d.features);
-export async function predictProb(features) {
+export async function predictProb(features = {}) {
   const res = await sendFeatures(features);
   // trả về 1 số duy nhất cho content.js
   return res.prob_fused ?? 0;
@@ -113,7 +142,7 @@ export async function predictProb(features) {
 // === Fallback nội bộ (heuristic) ===
 // dùng một số đặc trưng nhẹ để ước lượng sơ bộ (chỉ cho demo/dev)
 function heuristicProb(feats = {}) {
-  // kết hợp flatness, entropy, zcr, và RMS thô để ước lượng
+  // kết hợp flatness, entropy, zcr để ước lượng
   const s = feats.spec || {};
   const p1 = clamp01(
     0.55 * (s.flat || 0) +
@@ -174,7 +203,7 @@ function sanitizeFeatures(feats = {}) {
     lfcc,
     pcen_stats: { mean: pcen_mean, std: pcen_std },
     spec: specOut,
-    prosody: prosOut,
+    pros: prosOut,
     meta: metaOut,
   };
 }
@@ -189,13 +218,16 @@ function toFixedArray(arr, n) {
   while (out.length < n) out.push(0);
   return out;
 }
+
 function num(x) {
   const v = Number(x);
   return Number.isFinite(v) ? v : 0;
 }
+
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
 }
+
 function normEntropy(h) {
   // entropy đã chuẩn hoá 0..1 ở worklet (n_blocks-based) — ta clamp lại
   return clamp01(Number(h) || 0);

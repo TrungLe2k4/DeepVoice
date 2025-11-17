@@ -20,7 +20,8 @@ let smooth = { p: 0, alpha: 0.2 };
 // Throttle infer để tránh spam API / model
 let lastInferTime = 0;
 let inferBusy = false;
-const INFER_INTERVAL_MS = 300; // ms giữa 2 lần infer
+// ✅ SỬA: phân tích tối đa 1 lần mỗi 2 giây
+const INFER_INTERVAL_MS = 2000; // 2000ms = 2s giữa 2 lần infer
 
 // Tải module gọi API / fallback heuristic
 import(chrome.runtime.getURL("model.js"))
@@ -55,7 +56,8 @@ function ensureOverlay() {
   return overlay;
 }
 
-function setStatus(prob, reasons = []) {
+// ✅ ĐÃ SỬA: nhận thêm level từ backend
+function setStatus(prob, reasons = [], level = null) {
   const dot = document.getElementById("dv-dot");
   const fill = document.getElementById("dv-meter");
   const det = document.getElementById("dv-detail");
@@ -70,18 +72,26 @@ function setStatus(prob, reasons = []) {
   const reasonText =
     Array.isArray(reasons) && reasons.length ? reasons.join(" · ") : "";
 
-  if (smooth.p >= 0.85) {
+  // Nếu backend trả level thì ưu tiên dùng, không thì suy ra từ prob
+  let lv = level;
+  if (!lv) {
+    if (smooth.p >= 0.85) lv = "red";
+    else if (smooth.p >= 0.6) lv = "amber";
+    else lv = "green";
+  }
+
+  if (lv === "red") {
     dot.style.background = "#e53935";
     if (sub) sub.textContent = "Mức rủi ro: Cao";
-    det.textContent = "🔴 Nguy cơ cao. " + reasonText;
-  } else if (smooth.p >= 0.6) {
+    det.textContent = "🔴 Nguy cơ deepfake cao. " + reasonText;
+  } else if (lv === "amber") {
     dot.style.background = "#fb8c00";
     if (sub) sub.textContent = "Mức rủi ro: Trung bình";
     det.textContent = "🟠 Có dấu hiệu bất thường. " + reasonText;
   } else {
     dot.style.background = "#43a047";
     if (sub) sub.textContent = "Mức rủi ro: Thấp";
-    det.textContent = "🟢 An toàn.";
+    det.textContent = "🟢 An toàn. " + reasonText;
   }
 }
 
@@ -130,7 +140,7 @@ function localHeuristic(payload) {
   // 3) ZCR quá cao cũng gợi ý tín hiệu tổng hợp / nhiễu kỳ lạ
   score += Math.max(0, (zcr - 0.15) * 2.0);
 
-  // 4) Nếu F0 ổn định trong range giọng người (60–400), không phạt thêm
+  // 4) Nếu F0 ngoài range giọng người (60–400), cộng nhẹ
   if (f0 < 60 || f0 > 400) {
     score += 0.1;
   }
@@ -288,18 +298,20 @@ function makeChainFor(mediaEl) {
       const model = window.DVModel;
       let prob = 0;
       let reasons = [];
+      let level = null; // ✅ nhận level từ backend
 
       if (model?.sendFeatures) {
         const out = await model.sendFeatures(feats);
         prob = out?.prob_fused ?? out?.prob ?? 0;
         reasons = out?.reason || out?.reasons || [];
+        level = out?.level || null;
       } else if (model?.predictProb) {
         prob = await model.predictProb(feats);
       } else {
         prob = localHeuristic(feats);
       }
 
-      setStatus(prob, reasons);
+      setStatus(prob, reasons, level);
     } catch (e) {
       // im lặng để không spam console
     } finally {

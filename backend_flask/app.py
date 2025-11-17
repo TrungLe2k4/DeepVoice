@@ -5,6 +5,7 @@ import numpy as np
 import joblib
 import os
 import json
+from datetime import datetime
 
 app = Flask(__name__)
 CORS(app)
@@ -68,7 +69,7 @@ def analyze():
         if feats is None:
             return jsonify({"error": "Thiếu trường 'features' trong JSON"}), 400
 
-        # Chuyển về vector 1D chuẩn (196 phần tử)
+        # Chuyển về vector 1D chuẩn (196 phần tử) cho model
         vec = extract_feature_vector(feats)
 
         if vec.size != N_FEAT:
@@ -79,24 +80,38 @@ def analyze():
         # Dự đoán xác suất Deepfake
         prob = float(model.predict_proba(vec.reshape(1, -1))[0, 1])
 
-        # Gán mức cảnh báo
+        # Phân tích nhanh spec/prosody để sinh flags + extra reasons + snr
+        flags, extra_reasons, snr = quick_flags(feats, prob)
+
+        # Gán mức cảnh báo chính
         if prob >= 0.85:
             level = "red"
-            reason = "Tín hiệu tổng hợp rõ rệt (formant drift, PCEN phẳng)."
+            base_reason = "Tín hiệu tổng hợp rõ rệt (MFCC/LFCC/PCEN lệch chuẩn)."
         elif prob >= 0.6:
             level = "amber"
-            reason = "Có dấu hiệu bất thường trong MFCC/LFCC/PCEN."
+            base_reason = "Có dấu hiệu bất thường trong MFCC/LFCC/PCEN."
         else:
             level = "green"
-            reason = "An toàn: chưa thấy dấu hiệu giả mạo rõ ràng."
+            base_reason = "An toàn: chưa thấy dấu hiệu giả mạo rõ ràng."
+
+        # Gộp reason: 1 reason chính + các reason phụ (loại trùng)
+        reasons = [base_reason]
+        for r in extra_reasons:
+            if r and r not in reasons:
+                reasons.append(r)
+
+        # 🔴 Ghi log mỗi lần gọi /analyze
+        log_event(feats, prob, level, flags, snr)
 
         return jsonify({
             "prob_fast": prob,
-            "prob_deep": prob * 0.95,   # tạm thời reuse fast cho demo
+            "prob_deep": prob * 0.95,    # tạm thời reuse fast cho demo
             "prob_embed": prob * 0.90,
             "prob_fused": prob,
-            "reason": [reason],
+            "reason": reasons,
             "level": level,
+            "snr": snr,
+            "flags": flags,
             "version": "dv-1.0.0"
         })
 
@@ -105,7 +120,122 @@ def analyze():
 
 
 # =========================
-# 4️⃣  HÀM PHỤ TRỢ
+# 4️⃣  PHÂN TÍCH NHANH ĐỂ TẠO FLAGS
+# =========================
+def quick_flags(feats, prob):
+    """
+    Phân tích nhanh một số đặc trưng để sinh:
+      - flags: {too_clean, robotic_prosody, high_zcr, weird_f0, ...}
+      - extra_reasons: list[str] mô tả cho overlay
+      - snr: số dB (nếu có)
+    """
+    flags = {}
+    extra = []
+    snr = 0.0
+
+    # Nếu features là dict (đúng format từ extension)
+    if isinstance(feats, dict):
+        spec = feats.get("spec", {}) or {}
+        pros = feats.get("prosody", {}) or {}
+        meta = feats.get("meta", {}) or {}
+
+        zcr = float(spec.get("zcr", 0.0))
+        flat = float(spec.get("flat", 0.0))
+        entropy = float(spec.get("entropy", 0.0))
+        contrast = float(spec.get("contrast", 0.0))
+
+        f0 = float(pros.get("f0", 0.0))
+        jitter = float(pros.get("jitter", 0.0))
+        shimmer = float(pros.get("shimmer", 0.0))
+        cpp = float(pros.get("cpp", 0.0))
+
+        snr = float(meta.get("snr", 0.0))
+
+        # 1) Âm thanh quá "sạch" & phẳng
+        if snr > 28 and flat > 0.5 and entropy < 0.5:
+            flags["too_clean"] = True
+            extra.append("Phổ tần số rất sạch & phẳng (nghi ngờ tổng hợp).")
+
+        # 2) Prosody robot: jitter/shimmer rất thấp, CPP cao
+        if jitter < 0.5 and shimmer < 0.5 and cpp > 8:
+            flags["robotic_prosody"] = True
+            extra.append("Độ run & biên độ giọng rất thấp, formant ổn định bất thường.")
+
+        # 3) ZCR cao
+        if zcr > 0.25:
+            flags["high_zcr"] = True
+            extra.append("Zero-crossing rate cao, có thể là tín hiệu tổng hợp / nhiễu lạ.")
+
+        # 4) F0 lạ
+        if 0 < f0 < 60 or f0 > 400:
+            flags["weird_f0"] = True
+            extra.append("Tần số cơ bản nằm ngoài dải giọng người điển hình.")
+
+        # 5) Nếu prob thấp & không có flag nào → reassure
+        if prob < 0.4 and not flags:
+            extra.append("Đặc trưng ổn định, phù hợp giọng nói tự nhiên.")
+    else:
+        # Không phải dict (ví dụ: gửi thẳng vector) → không phân tích được chi tiết
+        if prob < 0.4:
+            extra.append("Đặc trưng tổng thể ở mức an toàn.")
+
+    return flags, extra, snr
+
+
+# =========================
+# 5️⃣  GHI LOG SỰ KIỆN /analyze
+# =========================
+def log_event(feats, prob, level, flags, snr):
+    """
+    Ghi lại mỗi lần /analyze vào file JSONL:
+      backend_flask/Logs/events.jsonl
+
+    Mỗi dòng là một JSON:
+      {
+        "ts": "...",
+        "prob": ...,
+        "level": "...",
+        "snr": ...,
+        "flags": {...},
+        "spec": {...},
+        "prosody": {...},
+        "meta": {...}
+      }
+    """
+    try:
+        log_dir = os.path.join(BASE_DIR, "Logs")
+        os.makedirs(log_dir, exist_ok=True)
+        log_path = os.path.join(log_dir, "events.jsonl")
+
+        event = {
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "prob": float(prob),
+            "level": level,
+            "snr": float(snr),
+            "flags": flags or {},
+        }
+
+        # Nếu feats là dict (đúng format từ extension) thì log gọn phần spec/prosody/meta
+        if isinstance(feats, dict):
+            event["spec"] = feats.get("spec", {})
+            event["prosody"] = feats.get("prosody", {})
+            event["meta"] = feats.get("meta", {})
+        else:
+            # Nếu là vector phẳng thì chỉ log độ dài
+            try:
+                event["raw_dim"] = int(np.asarray(feats).size)
+            except Exception:
+                event["raw_dim"] = 0
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception as e:
+        # Không để việc log lỗi làm crash API
+        print("[LOG_EVENT_ERR]", e)
+
+
+# =========================
+# 6️⃣  HÀM GHÉP VECTOR ĐẶC TRƯNG
 # =========================
 def extract_feature_vector(feats):
     """
@@ -185,7 +315,7 @@ def extract_feature_vector(feats):
 
 
 # =========================
-# 5️⃣  MAIN
+# 7️⃣  MAIN
 # =========================
 if __name__ == "__main__":
     # debug=True để tiện dev, khi deploy thật nên để False
