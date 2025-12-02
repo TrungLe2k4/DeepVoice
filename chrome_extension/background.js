@@ -1,7 +1,11 @@
-// background.js — DeepVoice Guard toggle per tab
-// Mỗi tab Meet có trạng thái ON/OFF riêng.
+// background.js — DeepVoice Guard
+// 1) Toggle theo từng tab Google Meet
+// 2) Proxy gọi API Flask /analyze cho model.js (DV_API_ANALYZE)
 
 const tabStates = new Map(); // tabId -> boolean (true = đang giám sát)
+
+// API backend mặc định (dev)
+const DEFAULT_API_BASE = "http://127.0.0.1:5000";
 
 function isMeetUrl(url) {
   return typeof url === "string" && url.startsWith("https://meet.google.com/");
@@ -82,4 +86,50 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.action.setBadgeText({ text: "" });
   chrome.action.setBadgeBackgroundColor({ color: "#e53935" });
+});
+
+/* ============================================================
+ *  Proxy API: nhận DV_API_ANALYZE từ model.js và gọi Flask
+ * ========================================================== */
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || !msg.type) return;
+
+  if (msg.type === "DV_API_ANALYZE") {
+    const apiBase = msg.apiBase || DEFAULT_API_BASE;
+    const body = msg.body || {};
+
+    (async () => {
+      try {
+        console.log("[DV][BG] Forward /analyze →", apiBase, body);
+
+        const res = await fetch(`${apiBase}/analyze`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          console.warn("[DV][BG] /analyze HTTP error:", res.status, text);
+          sendResponse({
+            ok: false,
+            error: `HTTP ${res.status}`,
+          });
+          return;
+        }
+
+        const data = await res.json();
+        console.log("[DV][BG] /analyze OK:", data);
+        sendResponse({ ok: true, data });
+      } catch (e) {
+        console.error("[DV] background DV_API_ANALYZE error:", e);
+        sendResponse({ ok: false, error: String(e) });
+      }
+    })();
+
+    // return true để giữ channel async cho sendResponse
+    return true;
+  }
+
+  // các loại message khác (nếu sau này cần) thì xử lý thêm ở đây
 });
