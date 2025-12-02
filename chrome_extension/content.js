@@ -20,8 +20,12 @@ let smooth = { p: 0, alpha: 0.2 };
 // Throttle infer để tránh spam API / model
 let lastInferTime = 0;
 let inferBusy = false;
-// ✅ SỬA: phân tích tối đa 1 lần mỗi 2 giây
+// ✅ Phân tích tối đa 1 lần mỗi 2 giây
 const INFER_INTERVAL_MS = 2000; // 2000ms = 2s giữa 2 lần infer
+
+// 🔴 Banner cảnh báo trên Google Meet
+let alertBox = null;
+let alertTimeoutId = null;
 
 // Tải module gọi API / fallback heuristic
 import(chrome.runtime.getURL("model.js"))
@@ -56,7 +60,102 @@ function ensureOverlay() {
   return overlay;
 }
 
-// ✅ ĐÃ SỬA: nhận thêm level từ backend
+// 🔴 Banner cảnh báo trên trang Meet (trên cùng màn hình)
+function ensureAlertBox() {
+  if (alertBox && document.contains(alertBox)) return alertBox;
+
+  alertBox = document.createElement("div");
+  alertBox.id = "dv-alert";
+  alertBox.innerHTML = `<span id="dv-alert-text"></span>`;
+
+  // Style inline để không cần CSS riêng
+  Object.assign(alertBox.style, {
+    position: "fixed",
+    top: "12px",
+    left: "50%",
+    transform: "translateX(-50%) translateY(-6px)",
+    zIndex: 999999,
+    padding: "10px 16px",
+    borderRadius: "999px",
+    fontFamily:
+      "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+    fontSize: "13px",
+    fontWeight: "500",
+    color: "#fff",
+    boxShadow: "0 4px 16px rgba(0,0,0,0.25)",
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    opacity: "0",
+    pointerEvents: "none",
+    transition: "opacity 0.25s ease-out, transform 0.25s ease-out",
+    transformOrigin: "top center",
+  });
+
+  document.documentElement.appendChild(alertBox);
+  return alertBox;
+}
+
+function hideAlertBanner() {
+  if (!alertBox) return;
+  alertBox.style.opacity = "0";
+  alertBox.style.transform = "translateX(-50%) translateY(-6px)";
+}
+
+function showAlertBanner(prob, level, reasons = []) {
+  // Chỉ hiển thị cảnh báo cho amber / red
+  let lv = level;
+  if (!lv) {
+    if (prob >= 0.85) lv = "red";
+    else if (prob >= 0.6) lv = "amber";
+    else lv = "green";
+  }
+  if (lv === "green") return;
+
+  const box = ensureAlertBox();
+  const textEl = box.querySelector("#dv-alert-text");
+  if (!textEl) return;
+
+  const filteredReasons = Array.isArray(reasons)
+    ? reasons.filter(
+        (r) =>
+          r !== "local-vad-gate" &&
+          r !== "server-throttle" &&
+          r !== "api-fallback"
+      )
+    : [];
+
+  const mainReason =
+    filteredReasons.length > 0
+      ? filteredReasons[0]
+      : "Phát hiện tín hiệu bất thường trong giọng nói.";
+
+  let titlePrefix = "";
+  let bg = "";
+  if (lv === "red") {
+    titlePrefix = "⚠️ Nguy cơ deepfake cao – ";
+    bg = "linear-gradient(90deg, #d32f2f, #f44336)";
+  } else {
+    titlePrefix = "⚠️ Cảnh báo deepfake – ";
+    bg = "linear-gradient(90deg, #ef6c00, #fb8c00)";
+  }
+
+  box.style.backgroundImage = bg;
+  textEl.textContent = titlePrefix + mainReason;
+
+  // Hiện banner
+  box.style.opacity = "1";
+  box.style.transform = "translateX(-50%) translateY(0)";
+
+  if (alertTimeoutId) {
+    clearTimeout(alertTimeoutId);
+  }
+  alertTimeoutId = setTimeout(() => {
+    hideAlertBanner();
+  }, 8000); // auto-hide sau 8s
+}
+
+// ✅ Cập nhật overlay bên dưới góc
 function setStatus(prob, reasons = [], level = null) {
   const dot = document.getElementById("dv-dot");
   const fill = document.getElementById("dv-meter");
@@ -68,11 +167,18 @@ function setStatus(prob, reasons = [], level = null) {
   smooth.p = smooth.alpha * p + (1 - smooth.alpha) * smooth.p;
   fill.style.width = smooth.p * 100 + "%";
 
-  // Ghép lý do gọn gàng
-  const reasonText =
-    Array.isArray(reasons) && reasons.length ? reasons.join(" · ") : "";
+  // Ghép lý do gọn gàng (bỏ các mã nội bộ như local-vad-gate, server-throttle)
+  const filteredReasons = Array.isArray(reasons)
+    ? reasons.filter(
+        (r) =>
+          r !== "local-vad-gate" &&
+          r !== "server-throttle" &&
+          r !== "api-fallback"
+      )
+    : [];
+  const reasonText = filteredReasons.length ? filteredReasons.join(" · ") : "";
 
-  // Nếu backend trả level thì ưu tiên dùng, không thì suy ra từ prob
+  // Nếu backend trả level thì ưu tiên dùng, không thì suy ra từ prob (đã smooth)
   let lv = level;
   if (!lv) {
     if (smooth.p >= 0.85) lv = "red";
@@ -82,15 +188,15 @@ function setStatus(prob, reasons = [], level = null) {
 
   if (lv === "red") {
     dot.style.background = "#e53935";
-    if (sub) sub.textContent = "Mức rủi ro: Cao";
+    if (sub) sub.textContent = "Mức rủi ro: Cao — đang phân tích tín hiệu...";
     det.textContent = "🔴 Nguy cơ deepfake cao. " + reasonText;
   } else if (lv === "amber") {
     dot.style.background = "#fb8c00";
-    if (sub) sub.textContent = "Mức rủi ro: Trung bình";
+    if (sub) sub.textContent = "Mức rủi ro: Trung bình — đang phân tích...";
     det.textContent = "🟠 Có dấu hiệu bất thường. " + reasonText;
   } else {
     dot.style.background = "#43a047";
-    if (sub) sub.textContent = "Mức rủi ro: Thấp";
+    if (sub) sub.textContent = "Mức rủi ro: Thấp — đang giám sát & phân tích...";
     det.textContent = "🟢 An toàn. " + reasonText;
   }
 }
@@ -155,7 +261,7 @@ async function start() {
   dvRunning = true;
 
   ensureOverlay();
-  setStatus(0.02, ["Đang khởi động..."]);
+  setStatus(0.02, ["Đang khởi động mô-đun phân tích..."]);
 
   // Tạo AudioContext
   if (!audioCtx) {
@@ -203,7 +309,7 @@ async function start() {
   requestAnimationFrame(() => {
     attachToMediaTags();
     observeMediaTags();
-    setStatus(0.05, ["Đang giám sát..."]);
+    setStatus(0.05, ["Đang giám sát & phân tích giọng nói trong cuộc gọi..."]);
   });
 }
 
@@ -245,6 +351,16 @@ function stop() {
     overlay.remove();
     overlay = null;
   }
+
+  if (alertBox) {
+    alertBox.remove();
+    alertBox = null;
+  }
+  if (alertTimeoutId) {
+    clearTimeout(alertTimeoutId);
+    alertTimeoutId = null;
+  }
+
   smooth.p = 0;
 }
 
@@ -294,11 +410,22 @@ function makeChainFor(mediaEl) {
     inferBusy = true;
 
     const feats = d.payload;
+
+    // 👉 Debug nhẹ (bật khi cần)
+    // console.log("[DV] features tick:",
+    //   "SNR=", feats.meta?.snr,
+    //   "flat=", feats.spec?.flat,
+    //   "zcr=", feats.spec?.zcr
+    // );
+
     try {
       const model = window.DVModel;
       let prob = 0;
       let reasons = [];
-      let level = null; // ✅ nhận level từ backend
+      let level = null; // nhận level từ backend nếu có
+
+      // Cho UI biết đang phân tích
+      setStatus(smooth.p, ["Đang phân tích tín hiệu..."], level);
 
       if (model?.sendFeatures) {
         const out = await model.sendFeatures(feats);
@@ -311,9 +438,20 @@ function makeChainFor(mediaEl) {
         prob = localHeuristic(feats);
       }
 
+      // Cập nhật overlay
       setStatus(prob, reasons, level);
+
+      // Tự quyết định khi nào show banner cảnh báo
+      const effLevel =
+        level ||
+        (prob >= 0.85 ? "red" : prob >= 0.6 ? "amber" : "green");
+
+      if (effLevel === "red" || effLevel === "amber") {
+        showAlertBanner(prob, effLevel, reasons);
+      }
     } catch (e) {
-      // im lặng để không spam console
+      // im lặng để không spam console khi chạy lâu
+      // console.warn("[DV] infer error:", e);
     } finally {
       inferBusy = false;
     }
@@ -426,6 +564,14 @@ chrome.runtime.onMessage.addListener((msg) => {
           overlay.remove();
           overlay = null;
         }
+        if (alertBox) {
+          alertBox.remove();
+          alertBox = null;
+        }
+        if (alertTimeoutId) {
+          clearTimeout(alertTimeoutId);
+          alertTimeoutId = null;
+        }
         smooth.p = 0;
       }
       return;
@@ -434,7 +580,9 @@ chrome.runtime.onMessage.addListener((msg) => {
     // Đang OFF → chuẩn bị bật, chờ user gesture trong tab
     pendingStart = true;
     ensureOverlay();
-    setStatus(0.02, ["Nhấp vào cửa sổ Meet để bắt đầu giám sát..."]);
+    setStatus(0.02, [
+      "Nhấp vào cửa sổ Meet để bắt đầu giám sát & phân tích...",
+    ]);
     bindGestureOnce();
     return;
   }
@@ -443,7 +591,9 @@ chrome.runtime.onMessage.addListener((msg) => {
   if (msg.type === "DV_START") {
     pendingStart = true;
     ensureOverlay();
-    setStatus(0.02, ["Nhấp vào cửa sổ Meet để bắt đầu giám sát..."]);
+    setStatus(0.02, [
+      "Nhấp vào cửa sổ Meet để bắt đầu giám sát & phân tích...",
+    ]);
     bindGestureOnce();
     return;
   }
@@ -456,6 +606,14 @@ chrome.runtime.onMessage.addListener((msg) => {
       if (overlay) {
         overlay.remove();
         overlay = null;
+      }
+      if (alertBox) {
+        alertBox.remove();
+        alertBox = null;
+      }
+      if (alertTimeoutId) {
+        clearTimeout(alertTimeoutId);
+        alertTimeoutId = null;
       }
       smooth.p = 0;
     }

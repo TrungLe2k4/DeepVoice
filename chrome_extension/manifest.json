@@ -3,7 +3,7 @@
   "name": "DeepVoice Attack Guard",
   "version": "0.1.0",
   "description": "Phát hiện dấu hiệu deepfake giọng nói trong Google Meet.",
-  
+
   "action": {
     "default_title": "DeepVoice Guard"
   },
@@ -37,8 +37,7 @@
         "overlay.css"
       ],
       "run_at": "document_idle",
-      "all_frames": true,
-      "type": "module"
+      "all_frames": true
     }
   ],
 
@@ -46,7 +45,6 @@
     {
       "resources": [
         "worklet-processor.js",
-        "utils_dsp.js",
         "model.js"
       ],
       "matches": [

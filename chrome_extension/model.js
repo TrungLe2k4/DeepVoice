@@ -1,7 +1,8 @@
 // model.js — gửi vector đặc trưng tới Flask /analyze + fallback heuristic
 
 // === Cấu hình API ===
-// Khi deploy, sửa BASE_URL_DEFAULT sang https://your-domain.com hoặc 127.0.0.1:5000 khi dev
+// Khi deploy, sửa BASE_URL_DEFAULT sang https://your-domain.com
+// hoặc http://<server>:5000 khi dev
 const BASE_URL_DEFAULT = "http://127.0.0.1:5000";
 let API_BASE = BASE_URL_DEFAULT;
 
@@ -23,7 +24,10 @@ export async function setApiBase(url) {
     if (typeof chrome !== "undefined" && chrome.storage?.local?.get) {
       chrome.storage.local.get("dv_api_base", (st) => {
         if (chrome.runtime?.lastError) {
-          console.warn("[DV] chrome.storage.get error:", chrome.runtime.lastError);
+          console.warn(
+            "[DV] chrome.storage.get error:",
+            chrome.runtime.lastError
+          );
           return;
         }
         if (st && st.dv_api_base) {
@@ -40,10 +44,54 @@ export async function setApiBase(url) {
 // === Throttle để không spam server ===
 // (đã có VAD ở worklet + throttle ở content.js, cái này chỉ là tầng bảo vệ thêm)
 let lastServerCall = 0;
-// Có thể chỉnh nếu muốn: 800 = 0.8s, 2000 = 2s,...
-const MIN_SERVER_INTERVAL_MS = 800; // không gọi /analyze quá ~1 lần/giây
+// Đồng bộ với content.js: khoảng 2s mới gọi server 1 lần
+const MIN_SERVER_INTERVAL_MS = 2000;
 
-// === Gọi API /analyze ===
+/* ============================================================
+ *  Helper: gọi backend /analyze qua background.js
+ * ========================================================== */
+async function callBackendAnalyze(body) {
+  // Nếu chạy trong extension → dùng sendMessage sang service worker
+  if (typeof chrome !== "undefined" && chrome.runtime?.id && chrome.runtime?.sendMessage) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(
+        {
+          type: "DV_API_ANALYZE",
+          apiBase: API_BASE,
+          body,
+        },
+        (resp) => {
+          if (chrome.runtime?.lastError) {
+            console.warn(
+              "[DV] sendMessage DV_API_ANALYZE error:",
+              chrome.runtime.lastError
+            );
+            reject(chrome.runtime.lastError);
+            return;
+          }
+          if (!resp || !resp.ok) {
+            reject(new Error(resp?.error || "No response from background"));
+            return;
+          }
+          resolve(resp.data);
+        }
+      );
+    });
+  }
+
+  // Fallback: gọi trực tiếp (chủ yếu để test ngoài môi trường extension)
+  const res = await fetch(`${API_BASE}/analyze`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+/* ============================================================
+ *  Gọi API /analyze
+ * ========================================================== */
 export async function sendFeatures(features = {}) {
   const now = Date.now();
 
@@ -52,9 +100,10 @@ export async function sendFeatures(features = {}) {
   const metaIn = (features && features.meta) || {};
   const snrIn = typeof metaIn.snr === "number" ? metaIn.snr : 0;
 
-  // 🟢 GATE: nếu SNR rất thấp (gần im lặng) hoặc heuristic cực thấp
-  // => chỉ dùng heuristic, KHÔNG gọi API /analyze
-  if (snrIn < 3 || heur < 0.1) {
+  // 🟢 GATE MỚI:
+  // Chỉ chặn khi gần như im lặng hoàn toàn (SNR rất thấp và heuristic ≈ 0)
+  // → các đoạn có tiếng nói (kể cả voice changer) vẫn được gửi lên backend
+  if (snrIn < 0.5 && heur < 0.02) {
     return {
       prob_fast: heur,
       prob_deep: heur,
@@ -65,7 +114,9 @@ export async function sendFeatures(features = {}) {
       level: "",
       snr: snrIn,
       flags: {},
+      alert: false,
       version: "dv-local",
+      source: "local-gate",
     };
   }
 
@@ -81,7 +132,9 @@ export async function sendFeatures(features = {}) {
       level: "",
       snr: snrIn,
       flags: {},
+      alert: false,
       version: "dv-local",
+      source: "local-throttle",
     };
   }
   lastServerCall = now;
@@ -90,15 +143,22 @@ export async function sendFeatures(features = {}) {
   const body = { features: sanitizeFeatures(features) };
 
   try {
-    const res = await fetch(`${API_BASE}/analyze`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const out = await res.json();
+    // ❗ GỌI BACKEND QUA BACKGROUND (tránh mixed-content)
+    const out = await callBackendAnalyze(body);
 
     const prob_fused = out.prob_fused ?? heur;
+    const level = out.level || "";
+    const flags = out.flags || {};
+    const reasons = Array.isArray(out.reason) ? out.reason : [];
+    const snr = typeof out.snr === "number" ? out.snr : snrIn;
+
+    // Nếu backend có trả alert thì dùng, không thì suy ra
+    let alert = false;
+    if (typeof out.alert === "boolean") {
+      alert = out.alert;
+    } else {
+      alert = prob_fused >= 0.85 || level === "red";
+    }
 
     // normalize output tối thiểu cần cho UI
     return {
@@ -107,11 +167,13 @@ export async function sendFeatures(features = {}) {
       prob_embed: out.prob_embed ?? prob_fused,
       prob_fused,
       prob_heur: heur,
-      reason: Array.isArray(out.reason) ? out.reason : [],
-      level: out.level || "",
-      snr: typeof out.snr === "number" ? out.snr : snrIn,
-      flags: out.flags || {},
+      reason: reasons,
+      level,
+      snr,
+      flags,
+      alert,
       version: out.version || "dv-unknown",
+      source: "server",
     };
   } catch (e) {
     // fallback khi API lỗi/offline
@@ -126,20 +188,23 @@ export async function sendFeatures(features = {}) {
       level: "",
       snr: snrIn,
       flags: {},
+      alert: false,
       version: "dv-offline",
+      source: "offline-heuristic",
     };
   }
 }
 
 // === API chính được content.js gọi ===
-// content.js hiện đang làm: const prob = await DVModel.predictProb(d.features);
 export async function predictProb(features = {}) {
   const res = await sendFeatures(features);
   // trả về 1 số duy nhất cho content.js
   return res.prob_fused ?? 0;
 }
 
-// === Fallback nội bộ (heuristic) ===
+/* ============================================================
+ *  Fallback nội bộ (heuristic)
+ * ========================================================== */
 // dùng một số đặc trưng nhẹ để ước lượng sơ bộ (chỉ cho demo/dev)
 function heuristicProb(feats = {}) {
   // kết hợp flatness, entropy, zcr để ước lượng
@@ -164,6 +229,9 @@ function heuristicProb(feats = {}) {
   return clamp01(0.7 * p1 + 0.3 * p2);
 }
 
+/* ============================================================
+ *  Chuẩn hóa features trước khi gửi server
+ * ========================================================== */
 function sanitizeFeatures(feats = {}) {
   // đảm bảo đủ field theo contract server
   const mfcc = toFixedArray(feats.mfcc, 39);
@@ -213,7 +281,6 @@ function toFixedArray(arr, n) {
   if (!Array.isArray(arr)) return new Array(n).fill(0);
   const v = arr.flat().map(num);
   if (v.length >= n) return v.slice(0, n);
-  // pad 0 nếu thiếu
   const out = v.slice();
   while (out.length < n) out.push(0);
   return out;
