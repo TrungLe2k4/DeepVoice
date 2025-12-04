@@ -10,17 +10,16 @@ import librosa
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 
-from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, accuracy_score
+from sklearn.metrics import roc_auc_score
 
 import pandas as pd
 
 # ================== CẤU HÌNH ĐƯỜNG DẪN ==================
-# Thư mục audio gốc (đã clean): chứa real/ và fake/
+# Thư mục audio đã clean: chứa real/ và fake/
 DATA_ROOT = r"D:\DeepVoice\Data\Cleaned"
+METADATA_CSV = r"D:\DeepVoice\Data\metadata_master.csv"
 
 BASE_DIR = os.path.dirname(__file__)
 MODEL_DIR = os.path.join(BASE_DIR, "Models")
@@ -32,7 +31,9 @@ RES2NET_METRICS = os.path.join(MODEL_DIR, "res2net_metrics.json")
 
 # ================== CẤU HÌNH AUDIO / SPEC ==================
 SR = 16000
-DURATION = 4.0  # giây (cắt / pad về 4s)
+DURATION = 5.0  # giây (cắt / pad về 5s cho đồng bộ với fast model)
+TARGET_LEN = int(SR * DURATION)
+
 N_MELS = 80
 N_FFT = 1024
 HOP_LENGTH = 256
@@ -57,20 +58,33 @@ def set_seed(seed=42):
         torch.cuda.manual_seed_all(seed)
 
 
+def pad_or_trim(y: np.ndarray, target_len: int) -> np.ndarray:
+    """
+    Pad hoặc cắt tín hiệu audio về đúng độ dài target_len mẫu.
+    Thay cho librosa.util.fix_length để tránh lỗi version.
+    """
+    cur_len = len(y)
+    if cur_len > target_len:
+        return y[:target_len]
+    if cur_len < target_len:
+        pad_width = target_len - cur_len
+        return np.pad(y, (0, pad_width), mode="constant")
+    return y
+
+
 def load_wav_fixed(path, sr=SR, duration=DURATION):
-    """Đọc wav, resample, cắt/pad về độ dài cố định."""
+    """Đọc wav, resample, cắt/pad về độ dài cố định (duration giây)."""
     sig, orig_sr = sf.read(str(path), dtype="float32")
+
+    # mixdown nếu stereo
     if sig.ndim > 1:
-        sig = np.mean(sig, axis=1)  # mixdown stereo -> mono
+        sig = np.mean(sig, axis=1)
 
     if orig_sr != sr:
         sig = librosa.resample(sig, orig_sr=orig_sr, target_sr=sr)
 
     target_len = int(sr * duration)
-    if len(sig) < target_len:
-        sig = librosa.util.fix_length(sig, target_len)
-    elif len(sig) > target_len:
-        sig = sig[:target_len]
+    sig = pad_or_trim(sig, target_len)
 
     return sig
 
@@ -114,34 +128,68 @@ class DeepfakeSpecDataset(Dataset):
         spec = (spec - m) / s
 
         spec = np.expand_dims(spec, axis=0)  # (1, F, T)
-        spec = torch.from_numpy(spec)  # float32
+        spec = torch.from_numpy(spec)        # float32
         y = torch.tensor(float(y), dtype=torch.float32)
 
         return spec, y
 
 
-def build_file_list(root):
-    paths = []
-    labels = []
-    root = Path(root)
+def build_splits_from_metadata(clean_root: str, meta_csv: str):
+    """
+    Dùng metadata_master.csv để tách train / val / test giống hệt fast model.
 
-    real_dir = root / "real"
-    fake_dir = root / "fake"
+    metadata_master.csv cần có cột:
+      - file_path: "real/xxxx.wav" hoặc "fake/yyyy.wav"
+      - label: "real" / "fake"
+      - set: "train" / "val" / "test"
+    """
+    if not os.path.isfile(meta_csv):
+        raise FileNotFoundError(f"Không tìm thấy metadata CSV: {meta_csv}")
 
-    if not real_dir.exists():
-        print(f"⚠️ Không thấy thư mục real: {real_dir}")
-    if not fake_dir.exists():
-        print(f"⚠️ Không thấy thư mục fake: {fake_dir}")
+    df = pd.read_csv(meta_csv)
+    required_cols = {"file_path", "label", "set"}
+    if not required_cols.issubset(df.columns):
+        raise ValueError(
+            f"metadata_master.csv phải chứa các cột: {required_cols}"
+        )
 
-    for wav in real_dir.rglob("*.wav"):
-        paths.append(str(wav))
-        labels.append(0)
+    paths_tr, y_tr = [], []
+    paths_val, y_val = [], []
+    paths_te, y_te = [], []
 
-    for wav in fake_dir.rglob("*.wav"):
-        paths.append(str(wav))
-        labels.append(1)
+    for _, row in df.iterrows():
+        rel_path = str(row["file_path"])
+        label_str = str(row["label"]).lower()
+        set_str = str(row["set"]).lower()
 
-    return np.array(paths), np.array(labels, dtype=np.int64)
+        full_path = os.path.join(clean_root, rel_path)
+        if not os.path.isfile(full_path):
+            print(f"⚠️ Mất file audio, bỏ qua: {full_path}")
+            continue
+
+        yi = 1 if label_str == "fake" else 0
+
+        if set_str == "train":
+            paths_tr.append(full_path)
+            y_tr.append(yi)
+        elif set_str == "val":
+            paths_val.append(full_path)
+            y_val.append(yi)
+        elif set_str == "test":
+            paths_te.append(full_path)
+            y_te.append(yi)
+        else:
+            # nếu set khác (ví dụ lỗi nhập), bỏ qua
+            print(f"⚠️ set không hợp lệ '{set_str}' cho {full_path}, bỏ qua.")
+
+    paths_tr = np.array(paths_tr)
+    paths_val = np.array(paths_val)
+    paths_te = np.array(paths_te)
+    y_tr = np.array(y_tr, dtype=np.int64)
+    y_val = np.array(y_val, dtype=np.int64)
+    y_te = np.array(y_te, dtype=np.int64)
+
+    return paths_tr, y_tr, paths_val, y_val, paths_te, y_te
 
 
 # ================== RES2NET BLOCK ==================
@@ -355,12 +403,15 @@ def eval_epoch(model, loader, device, epoch, split_name="Val"):
     avg_loss = running_loss / max(1, n_samples)
     avg_acc = running_correct / max(1, n_samples)
 
-    all_probs = np.concatenate(all_probs, axis=0)
-    all_labels = np.concatenate(all_labels, axis=0)
+    all_probs = np.concatenate(all_probs, axis=0) if all_probs else np.array([])
+    all_labels = np.concatenate(all_labels, axis=0) if all_labels else np.array([])
 
-    try:
-        auc = roc_auc_score(all_labels, all_probs)
-    except Exception:
+    if all_probs.size > 0 and all_labels.size > 0:
+        try:
+            auc = roc_auc_score(all_labels, all_probs)
+        except Exception:
+            auc = float("nan")
+    else:
         auc = float("nan")
 
     print(
@@ -374,39 +425,19 @@ def eval_epoch(model, loader, device, epoch, split_name="Val"):
 def main():
     set_seed(SEED)
 
-    print("📂 Đang đọc danh sách file từ:", DATA_ROOT)
-    paths, labels = build_file_list(DATA_ROOT)
-
-    if paths.size == 0:
-        print("❌ Không có file wav nào, kiểm tra lại DATA_ROOT")
-        return
-
-    print(
-        f"✅ Tổng số file: {len(paths)}, tỷ lệ fake: {labels.mean():.4f}"
-    )
-
-    # Split: train / val / test
-    p_train = 0.72  # 72% train, 14% val, 14% test (xấp xỉ)
-    p_temp = 1 - p_train
-
-    paths_tr, paths_tmp, y_tr, y_tmp = train_test_split(
-        paths,
-        labels,
-        test_size=p_temp,
-        random_state=SEED,
-        stratify=labels,
-    )
-
-    paths_val, paths_te, y_val, y_te = train_test_split(
-        paths_tmp,
-        y_tmp,
-        test_size=0.5,
-        random_state=SEED,
-        stratify=y_tmp,
+    print("📂 Đang đọc splits từ metadata:", METADATA_CSV)
+    paths_tr, y_tr, paths_val, y_val, paths_te, y_te = build_splits_from_metadata(
+        DATA_ROOT, METADATA_CSV
     )
 
     print(
-        f"📊 Split: train={len(paths_tr)}, val={len(paths_val)}, test={len(paths_te)}"
+        f"✅ Số mẫu: train={len(paths_tr)}, val={len(paths_val)}, test={len(paths_te)}"
+    )
+    if len(paths_tr) == 0 or len(paths_val) == 0 or len(paths_te) == 0:
+        print("⚠️ Thiếu một trong các split (train/val/test), kiểm tra lại metadata.")
+    print(
+        f"   Tỷ lệ fake (train): {float(y_tr.mean()):.4f} | "
+        f"(val): {float(y_val.mean()):.4f} | (test): {float(y_te.mean()):.4f}"
     )
 
     train_ds = DeepfakeSpecDataset(paths_tr, y_tr)
@@ -435,9 +466,7 @@ def main():
         pin_memory=True,
     )
 
-    device = torch.device(
-        "cuda" if torch.cuda.is_available() else "cpu"
-    )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print("🖥  Device:", device)
 
     model = Res2NetClassifier(
