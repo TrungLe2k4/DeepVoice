@@ -23,6 +23,20 @@ def load_model():
     return pipe
 
 
+def pad_or_trim(sig: np.ndarray, target_len: int) -> np.ndarray:
+    """
+    Pad hoặc cắt tín hiệu audio về đúng độ dài target_len mẫu.
+    Thay thế cho librosa.util.fix_length để tránh lỗi version.
+    """
+    cur_len = len(sig)
+    if cur_len > target_len:
+        return sig[:target_len]
+    if cur_len < target_len:
+        pad_width = target_len - cur_len
+        return np.pad(sig, (0, pad_width), mode="constant")
+    return sig
+
+
 def preprocess_audio(path_wav: str):
     """Đọc file âm thanh và chuẩn hoá giống lúc train (mono, SR=16000, 5s)."""
     sig, sr = sf.read(path_wav, dtype="float32")
@@ -35,10 +49,14 @@ def preprocess_audio(path_wav: str):
         sig = librosa.resample(sig, orig_sr=sr, target_sr=SR)
 
     target_len = SR * 5  # 5 giây
-    if len(sig) < target_len:
-        sig = librosa.util.fix_length(sig, target_len)
-    elif len(sig) > target_len:
-        sig = sig[:target_len]
+    # ❌ Bỏ dùng librosa.util.fix_length vì lỗi TypeError
+    # if len(sig) < target_len:
+    #     sig = librosa.util.fix_length(sig, target_len)
+    # elif len(sig) > target_len:
+    #     sig = sig[:target_len]
+
+    # ✅ Dùng helper tự viết, an toàn với mọi version librosa
+    sig = pad_or_trim(sig, target_len)
 
     return sig
 
@@ -141,7 +159,7 @@ def main():
 
         # Option: vẫn lưu CSV 1 dòng cho tiện chèn vào báo cáo nếu muốn
         os.makedirs(MODEL_DIR, exist_ok=True)
-        with open(CSV_OUT_PATH, "w", newline="", encoding="utf-8") as f:
+        with open(CV_OUT_PATH, "w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(
                 f,
                 fieldnames=["filename", "path", "prob_fast", "label_fast"]
